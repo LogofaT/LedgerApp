@@ -1,7 +1,7 @@
 # LedgerApp
 
 A Java 17 / Spring Boot 4 double-entry ledger using MySQL, jOOQ, Flyway and
-RabbitMQ. This is a local synthetic-data demo, not a custody service.
+RabbitMQ. This demo uses synthetic data.
 
 ## Run and verify
 
@@ -23,23 +23,23 @@ instances in a uniquely named Compose project, then runs unit and real-stack
 integration tests. It removes only that project's containers and disposable
 database volume; it does not touch existing local database volumes.
 
-For an interactive stack, choose and retain a unique project name:
+Start the app and its dependencies:
 
 ```powershell
-$project = "ledger-demo-$([guid]::NewGuid().ToString('N').Substring(0,12))"
-docker compose -p $project up --build -d mysql rabbitmq app1 app2
+docker compose up --build
 # API: http://localhost:8080 and http://localhost:8081
+# Swagger UI: http://localhost:8080/swagger-ui/index.html
 # OpenAPI: http://localhost:8080/openapi.yaml
-docker compose -p $project down
 ```
 
-`down` leaves that project's database volume intact; `down -v` deletes it.
-Flyway applies all migrations automatically to a fresh database.
+Stop with Ctrl+C, then remove the containers:
 
-If reusing an older demo database, stop both app instances before applying V4,
-which changes identifier comparison and canonicalizes legacy entry aliases.
-For a disposable demo, a fresh uniquely named Compose project avoids this
-upgrade step without affecting another project's data.
+```powershell
+docker compose down
+```
+
+`down` preserves the database; `docker compose down -v` deletes its data.
+Flyway applies migrations automatically at startup.
 
 Local compilation and unit tests need only the Maven wrapper and JDK:
 
@@ -64,9 +64,8 @@ Account IDs, payment IDs and idempotency keys are case-sensitive: `alice`
 and `ALICE` are distinct accounts. An omitted `overdraftLimit` defaults to
 zero; an explicit null is invalid.
 
-The written contract is `src/main/resources/static/openapi.yaml`. Requests
-reject unknown JSON properties. Framework errors retain HTTP statuses such
-as 404 and 405, with structured problem bodies and applicable headers.
+The API contract is `src/main/resources/static/openapi.yaml`. Requests
+reject unknown JSON properties.
 
 ```sh
 curl -i http://localhost:8080/api/v1/accounts \
@@ -87,8 +86,7 @@ curl http://localhost:8080/api/v1/transactions/TRANSACTION_UUID
 Reverse with `POST /api/v1/transactions/{transactionId}/reversals`, also with
 an idempotency key. A reversal is a new transaction with flipped entries; the
 original remains immutable. Accounts expose their current balance. Transactions
-are read in their persisted entry order. Account-entry listing and historical
-balance endpoints are intentionally not provided.
+are read in their persisted entry order.
 
 ## Money and payments
 
@@ -96,13 +94,14 @@ Amounts are exact `BigDecimal` values and MySQL `DECIMAL(20,2)` values; no
 rounding or JSON numeric amounts are accepted. EUR/USD allow at most two
 fractional digits and JPY allows none. Each transaction has at least two
 positive entries, one currency, and equal debit/credit totals. Final
-per-account balances must satisfy the configured overdraft and signed DECIMAL
-bounds. Intermediate posting balances are not stored or checked: only the
+per-account balances must respect the overdraft limit and fit the database's
+numeric limits. Intermediate posting balances are not stored or checked: only the
 transaction's final aggregate is relevant.
 
 Settlement accounts `SETTLEMENT-EUR`, `SETTLEMENT-USD` and `SETTLEMENT-JPY`
-are seeded with unlimited economic overdraft (API `overdraftLimit: null`).
-They remain subject to DECIMAL storage bounds. Payment messages describe a
+exist from startup and can go negative without an overdraft limit
+(API `overdraftLimit: null`). Their balances must still fit the database's
+numeric limits. Payment messages describe a
 settled payment; the service constructs a debit to the matching settlement
 account and a credit to the existing merchant account. See
 `scripts/publish-payment.ps1` for the sample publisher. With the stack running
@@ -118,7 +117,15 @@ when needed. A `routed: true` response confirms routing, not ledger commit;
 read the account balance to observe processing. Reusing the payment ID with
 the same economics does not post again.
 
-## Five design decisions
+## Design decisions
+
+The REST API uses accounts and transactions as resources under `/api/v1`.
+Reversals are created under the original transaction rather than editing it.
+The checked-in OpenAPI contract describes requests, responses, and errors.
+
+RabbitMQ provides durable queues, manual acknowledgements, publisher
+confirmations, and dead-letter routing for payment processing and transaction
+announcements.
 
 1. **Gate-first writes:** every mutation locks one permanent MySQL gate row
    before any other query. This deliberately serializes writes across both
@@ -144,8 +151,9 @@ the same economics does not post again.
 Transaction announcements are **at least once**. A crash after broker
 confirmation but before the delivery mark can cause a duplicate; the stable
 message/event ID is the transaction ID, so consumers should deduplicate. No
-arrival-order guarantee is made. Payment poison is durably quarantined before
-acknowledgement; transient processing failures are retried and exhausted
+arrival-order guarantee is made. Invalid payment messages are saved to the
+database for inspection before acknowledgement; temporary processing failures
+are retried and exhausted
 messages go to the durable dead-letter queue. Ledger entries and transaction
 headers have database update/delete triggers. Idempotency receipts are
 permanent.
@@ -154,11 +162,16 @@ The two-instance integration suite uses real MySQL and RabbitMQ and covers
 replay/refusal, overdraft and opposite-transfer races, reversals and
 immutability, payment dedup/quarantine, rollback, zero sums and outbox
 republication. Unit tests cover exact money, request validation, receipts and
-final-balance planning. Abrupt process failover, sustained load, operational
-monitoring, backups, authentication, authorization and tenant isolation are
-outside this demo's scope. Compose binds published ports to localhost, but do
-not expose the service to untrusted networks or use it for real funds.
+final-balance planning. The tests do not kill processes to verify crash recovery.
+There is no authentication. Compose binds published ports to localhost; do not
+expose the service to untrusted networks or use it for real funds.
 
-AI assistance was used to draft implementation, tests and documentation.
-Verification claims are limited to the commands and results reported for the
-current checkout.
+## Improvements
+
+- Measure throughput under sustained load before replacing the single write
+  gate with finer-grained locking. The gate currently serializes all writes.
+- Add process-crash tests around database commit and broker confirmation.
+- Verify the Swagger examples as a complete walkthrough, including account
+  creation and funding.
+
+See [AI_USAGE.md](AI_USAGE.md) for how AI assisted development and review.
