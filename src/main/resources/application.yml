@@ -1,0 +1,53 @@
+server:
+  port: ${SERVER_PORT:8080}
+  max-http-request-header-size: 8KB
+spring:
+  application:
+    name: ledger-app
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/ledger?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC}
+    username: ${SPRING_DATASOURCE_USERNAME:ledger}
+    password: ${SPRING_DATASOURCE_PASSWORD:local-ledger}
+    hikari:
+      maximum-pool-size: 12
+      connection-timeout: 5000
+  flyway:
+    locations: classpath:db/migration
+  jackson:
+    default-property-inclusion: non_null
+  rabbitmq:
+    host: ${SPRING_RABBITMQ_HOST:localhost}
+    port: ${SPRING_RABBITMQ_PORT:5672}
+    username: ${SPRING_RABBITMQ_USERNAME:ledger}
+    password: ${SPRING_RABBITMQ_PASSWORD:local-ledger}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 1
+  task:
+    scheduling:
+      pool:
+        size: 2
+springdoc:
+  swagger-ui:
+    url: /openapi.yaml
+ledger:
+  instance-id: ${LEDGER_INSTANCE_ID:local}
+  max-entries: 100
+  outbox:
+    poll-ms: 1000
+    exchange: ledger.transactions
+    routing-key: transaction.committed
+  payments:
+    queue: ledger.payments
+    dead-letter-queue: ledger.payments.dlq
+    exchange: ledger.payment.ingress
+    routing-key: payment.settled
+logging:
+  level:
+    root: INFO
+    ledger: INFO

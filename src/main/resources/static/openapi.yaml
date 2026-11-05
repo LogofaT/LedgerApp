@@ -1,0 +1,263 @@
+openapi: 3.1.0
+info:
+  title: Ledger API
+  version: 1.0.0
+  description: |-
+    Local synthetic-data double-entry ledger. No authentication; do not expose to untrusted networks.
+    Async payment ingress uses durable RabbitMQ queue `ledger.payments` and the
+    `PaymentMessage` schema below; transaction announcements are at-least-once.
+    
+    Account IDs, payment IDs and Idempotency-Key values are case-sensitive.
+    HTTP requests reject unknown JSON properties and are limited to 65536 bytes.
+    All operations accept an optional X-Correlation-Id and return it on responses
+    that reach correlation processing. Invalid headers return 400, oversized
+    bodies return 413, unsupported methods return 405, unacceptable response
+    media types return 406, and unexpected infrastructure failures return 500.
+servers:
+  - url: http://localhost:8080
+paths:
+  /api/v1/accounts:
+    post:
+      operationId: openAccount
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OpenAccount'}
+      responses:
+        '201':
+          description: Account created or original response replayed
+          headers: {Location: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        default: {$ref: '#/components/responses/Problem'}
+  /api/v1/accounts/{accountId}:
+    get:
+      operationId: getAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountId'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Account balance and overdraft
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        default: {$ref: '#/components/responses/Problem'}
+  /api/v1/transactions:
+    post:
+      operationId: createTransaction
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateTransaction'}
+      responses:
+        '201':
+          description: Transaction committed or original response replayed
+          headers: {Location: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Transaction'}}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        default: {$ref: '#/components/responses/Problem'}
+  /api/v1/transactions/{transactionId}:
+    get:
+      operationId: getTransaction
+      parameters:
+        - {name: transactionId, in: path, required: true, schema: {type: string, format: uuid}}
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Immutable transaction details
+          content: {application/json: {schema: {$ref: '#/components/schemas/Transaction'}}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        default: {$ref: '#/components/responses/Problem'}
+  /api/v1/transactions/{transactionId}/reversals:
+    post:
+      operationId: reverseTransaction
+      parameters:
+        - {name: transactionId, in: path, required: true, schema: {type: string, format: uuid}}
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '201':
+          description: Reversal committed or original response replayed
+          headers: {Location: {schema: {type: string}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Transaction'}}}
+        '400': {$ref: '#/components/responses/Problem'}
+        '404': {$ref: '#/components/responses/Problem'}
+        '409': {$ref: '#/components/responses/Problem'}
+        '413': {$ref: '#/components/responses/Problem'}
+        '422': {$ref: '#/components/responses/Problem'}
+        default: {$ref: '#/components/responses/Problem'}
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Case-sensitive key, scoped by operation. Matching requests replay the stored response; changed payloads return 409.
+      schema: {type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9._:-]+$'}
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      schema: {type: string, minLength: 1, maxLength: 80, pattern: '^[A-Za-z0-9._:-]+$'}
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: Case-sensitive account identifier.
+      schema: {type: string, example: '10001'}
+  responses:
+    Problem:
+      description: Structured domain or HTTP error. Framework errors preserve their HTTP status and applicable headers such as Allow.
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+  schemas:
+    OpenAccount:
+      type: object
+      additionalProperties: false
+      required: [accountId, currency]
+      properties:
+        accountId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+          description: Case-sensitive. The prefix SETTLEMENT- is reserved.
+          example: '10001'
+        currency: {type: string, enum: [EUR, USD, JPY]}
+        overdraftLimit:
+          type: string
+          maxLength: 24
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+          default: '0'
+          description: Defaults to zero when omitted; explicit null is invalid. Nonnegative, at most 999999999999999999.99, with at most two fractional digits for EUR/USD and none for JPY.
+    Account:
+      type: object
+      required: [accountId, currency, balance, overdraftLimit, settlement]
+      properties:
+        accountId: {type: string, example: '10001'}
+        currency: {type: string, enum: [EUR, USD, JPY]}
+        balance: {type: string}
+        overdraftLimit:
+          type: [string, 'null']
+          description: Null for unlimited settlement overdraft; ordinary accounts have a nonnegative decimal string. DECIMAL storage bounds always apply.
+        settlement: {type: boolean}
+    CreateTransaction:
+      type: object
+      additionalProperties: false
+      required: [currency, description, entries]
+      properties:
+        currency: {type: string, enum: [EUR, USD, JPY]}
+        description: {type: string, minLength: 1, maxLength: 240, pattern: '[\s\S]*\S[\s\S]*'}
+        entries:
+          type: array
+          minItems: 2
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [accountId, direction, amount]
+            properties:
+              accountId: {type: string, minLength: 1, maxLength: 64, pattern: '[\s\S]*\S[\s\S]*', description: Case-sensitive account identifier, example: '10001'}
+              direction: {type: string, enum: [DEBIT, CREDIT]}
+              amount:
+                type: string
+                maxLength: 24
+                pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+                description: Strictly positive, at most 999999999999999999.99. EUR/USD allow at most two fractional digits; JPY allows none. No rounding.
+      example:
+        currency: EUR
+        description: Transfer between accounts
+        entries:
+          - accountId: '10001'
+            direction: DEBIT
+            amount: '10.00'
+          - accountId: '10002'
+            direction: CREDIT
+            amount: '10.00'
+    Problem:
+      type: object
+      required: [type, title, status, detail, code]
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        code: {type: string}
+        field: {type: string}
+        correlationId: {type: string}
+    LedgerEntry:
+      type: object
+      required: [entryIndex, accountId, direction, amount]
+      properties:
+        entryIndex: {type: integer, minimum: 0}
+        accountId: {type: string, example: '10001'}
+        direction: {type: string, enum: [DEBIT, CREDIT]}
+        amount: {type: string}
+    Transaction:
+      type: object
+      required: [transactionId, recordedAt, currency, description, entries]
+      properties:
+        transactionId: {type: string, format: uuid}
+        recordedAt: {type: string, format: date-time, description: Persisted UTC transaction recording timestamp}
+        currency: {type: string, enum: [EUR, USD, JPY]}
+        description: {type: string}
+        reversalOf: {type: [string, 'null'], format: uuid}
+        requestId: {type: [string, 'null']}
+        paymentId: {type: [string, 'null']}
+        entries: {type: array, items: {$ref: '#/components/schemas/LedgerEntry'}}
+    PaymentMessage:
+      type: object
+      additionalProperties: false
+      description: |-
+        Publish to exchange ledger.payment.ingress with routing key payment.settled
+        (durable queue ledger.payments). The service constructs exactly two postings:
+        debit SETTLEMENT-{currency}, credit merchantAccountId, for the supplied amount.
+        Merchant must exist, not be a settlement account, and match the payment currency.
+        No caller-supplied entries are accepted. Identity is paymentId + merchantAccountId
+        + currency + normalized amount; eventId/requestId/description are excluded.
+        Reused paymentId with changed economics is quarantined as PAYMENT_ID_PAYLOAD_CONFLICT.
+        Malformed/permanent refusals are durably quarantined before acknowledgement;
+        good payments are acknowledged only after ledger, receipt and outbox commit.
+      required: [eventId, paymentId, merchantAccountId, amount, currency]
+      properties:
+        eventId: {type: string, minLength: 1, maxLength: 120, pattern: '^[A-Za-z0-9._:-]+$'}
+        paymentId: {type: string, minLength: 1, maxLength: 100, pattern: '^[A-Za-z0-9._:-]+$'}
+        merchantAccountId: {type: string, minLength: 1, maxLength: 64, pattern: '.*\S.*', example: '10001'}
+        amount:
+          type: string
+          maxLength: 24
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]+)?$'
+          description: Strict positive decimal STRING, never a JSON number. No sign, whitespace or exponent; EUR/USD at most two fractional digits, JPY none. Maximum 999999999999999999.99. Normalized before deduplication.
+        requestId: {type: [string, 'null'], minLength: 1, maxLength: 80, pattern: '^[A-Za-z0-9._:-]+$'}
+        currency: {type: string, enum: [EUR, USD, JPY]}
+        description:
+          type: [string, 'null']
+          minLength: 1
+          maxLength: 240
+          pattern: '.*\S.*'
+          description: Omitted or null defaults to Payment settled; supplied strings must be nonblank. Validated even on duplicates.
+      example:
+        eventId: demo-event-001
+        paymentId: demo-payment-001
+        merchantAccountId: '10001'
+        amount: '12.50'
+        currency: EUR
+        requestId: demo-request-001
+        description: Synthetic payment

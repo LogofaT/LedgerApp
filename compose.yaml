@@ -1,0 +1,71 @@
+services:
+  mysql:
+    image: mysql:8.4
+    command: --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_DATABASE: ledger
+      MYSQL_USER: ledger
+      MYSQL_PASSWORD: local-ledger
+      MYSQL_ROOT_PASSWORD: local-root
+    ports: ["127.0.0.1:3306:3306"]
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uledger", "-plocal-ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ledger
+      RABBITMQ_DEFAULT_PASS: local-ledger
+    ports: ["127.0.0.1:5672:5672", "127.0.0.1:15672:15672"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+  app1:
+    build: .
+    environment: &app-env
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ledger?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: local-ledger
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ledger
+      SPRING_RABBITMQ_PASSWORD: local-ledger
+      LEDGER_INSTANCE_ID: app1
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      mysql: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+  app2:
+    build: .
+    environment:
+      <<: *app-env
+      LEDGER_INSTANCE_ID: app2
+    ports: ["127.0.0.1:8081:8080"]
+    depends_on:
+      mysql: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+  integration:
+    image: maven:3.9.9-eclipse-temurin-17
+    working_dir: /workspace
+    volumes: [".:/workspace"]
+    environment:
+      LEDGER_BASE_URL: http://app1:8080
+      LEDGER_SECOND_URL: http://app2:8080
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ledger
+      SPRING_RABBITMQ_PASSWORD: local-ledger
+      LEDGER_INTEGRATION: "true"
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ledger?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: ledger
+      SPRING_DATASOURCE_PASSWORD: local-ledger
+    depends_on:
+      app1: {condition: service_started}
+      app2: {condition: service_started}
+    profiles: ["test"]
+    command: ["mvn", "-B", "-q", "-Pintegration", "clean", "verify"]
+volumes:
+  mysql-data:

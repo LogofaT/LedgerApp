@@ -1,0 +1,20 @@
+services:
+  mysql:
+    image: mysql:8.4
+    command: --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_DATABASE: ledger
+      MYSQL_USER: ledger
+      MYSQL_PASSWORD: local-ledger
+      MYSQL_ROOT_PASSWORD: local-root
+    ports:
+      - "127.0.0.1:${JOOQ_MYSQL_PORT:-33306}:3306"
+    volumes:
+      - codegen-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uledger", "-plocal-ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+volumes:
+  codegen-mysql-data:
